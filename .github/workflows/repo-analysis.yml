@@ -49,31 +49,7 @@ jobs:
           from datetime import datetime
           import requests
 
-          LANGUAGES = {
-              'py': {'name': 'Python', 'extensions': ['.py'], 'comment_regex': r'^\s*#.*$'},
-              'js': {'name': 'JavaScript', 'extensions': ['.js', '.mjs'], 'comment_regex': r'^\s*//.*$|^\s*/\*.*?\*/$'},
-              'ts': {'name': 'TypeScript', 'extensions': ['.ts', '.tsx'], 'comment_regex': r'^\s*//.*$|^\s*/\*.*?\*/$'},
-              'jsx': {'name': 'React JSX', 'extensions': ['.jsx'], 'comment_regex': r'^\s*//.*$|^\s*/\*.*?\*/$'},
-              'tsx': {'name': 'React TSX', 'extensions': ['.tsx'], 'comment_regex': r'^\s*//.*$|^\s*/\*.*?\*/$'},
-              'java': {'name': 'Java', 'extensions': ['.java'], 'comment_regex': r'^\s*//.*$|^\s*/\*.*?\*/$'},
-              'cpp': {'name': 'C++', 'extensions': ['.cpp', '.cc', '.cxx', '.hpp', '.h'], 'comment_regex': r'^\s*//.*$|^\s*/\*.*?\*/$'},
-              'c': {'name': 'C', 'extensions': ['.c', '.h'], 'comment_regex': r'^\s*//.*$|^\s*/\*.*?\*/$'},
-              'go': {'name': 'Go', 'extensions': ['.go'], 'comment_regex': r'^\s*//.*$'},
-              'rs': {'name': 'Rust', 'extensions': ['.rs'], 'comment_regex': r'^\s*//.*$|^\s*/\*.*?\*/$'},
-              'rb': {'name': 'Ruby', 'extensions': ['.rb'], 'comment_regex': r'^\s*#.*$'},
-              'php': {'name': 'PHP', 'extensions': ['.php'], 'comment_regex': r'^\s*//.*$|^\s*#.*$|^\s*/\*.*?\*/$'},
-              'html': {'name': 'HTML', 'extensions': ['.html', '.htm'], 'comment_regex': r'^\s*<!--.*?-->$'},
-              'css': {'name': 'CSS', 'extensions': ['.css'], 'comment_regex': r'^\s*/\*.*?\*/$'},
-              'scss': {'name': 'SCSS', 'extensions': ['.scss'], 'comment_regex': r'^\s*//.*$|^\s*/\*.*?\*/$'},
-              'sh': {'name': 'Shell', 'extensions': ['.sh', '.bash'], 'comment_regex': r'^\s*#.*$'},
-              'sql': {'name': 'SQL', 'extensions': ['.sql'], 'comment_regex': r'^\s*--.*$|^\s*/\*.*?\*/$'},
-              'md': {'name': 'Markdown', 'extensions': ['.md'], 'comment_regex': None},
-              'json': {'name': 'JSON', 'extensions': ['.json'], 'comment_regex': None},
-              'yml': {'name': 'YAML', 'extensions': ['.yml', '.yaml'], 'comment_regex': r'^\s*#.*$'},
-              'txt': {'name': 'Text', 'extensions': ['.txt'], 'comment_regex': None},
-              'dockerfile': {'name': 'Dockerfile', 'extensions': ['dockerfile'], 'comment_regex': r'^\s*#.*$'},
-              'makefile': {'name': 'Makefile', 'extensions': ['makefile', 'mk'], 'comment_regex': r'^\s*#.*$'},
-          }
+          LANGUAGES = requests.get('https://gist.githubusercontent.com/yasserbdj96/8a9b325e815e17caa7d4b7f46a9c4ddb/raw/ca7063af63e75b00bb7dca0ff6055ab466e3d7b8/languages2.json').json()
 
           def get_language_from_extension(filename):
               ext = Path(filename).suffix.lower()
@@ -95,13 +71,16 @@ jobs:
               total_lines = len(lines)
               lang_info = LANGUAGES.get(language_key, {})
               comment_regex_str = lang_info.get('comment_regex')
+
               code_lines = 0
               comment_lines = 0
               empty_lines = 0
               in_multiline_comment = False
+
               comment_regex = None
               if comment_regex_str:
                   comment_regex = re.compile(comment_regex_str, re.MULTILINE)
+
               for line in lines:
                   stripped = line.strip()
                   if not stripped:
@@ -123,6 +102,7 @@ jobs:
                           is_comment = True
                   if not is_comment:
                       code_lines += 1
+
               return {
                   'total_lines': total_lines,
                   'code_lines': code_lines,
@@ -133,6 +113,7 @@ jobs:
           def analyze_file(filepath):
               rel_path = str(filepath.relative_to(Path.cwd()))
               filename = filepath.name
+
               if is_binary_file(filepath):
                   return {
                       'path': rel_path,
@@ -142,12 +123,16 @@ jobs:
                       'language': 'binary',
                       'language_name': 'Binary'
                   }
+
               lang_key, lang_name = get_language_from_extension(filename)
+
               try:
                   with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                       content = f.read()
+
                   lines_stats = count_lines_with_comments(content, lang_key)
                   file_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
+
                   return {
                       'path': rel_path,
                       'name': filename,
@@ -166,6 +151,7 @@ jobs:
                   return None
 
           print("🚀 Starting enhanced repository analysis...")
+
           repo_full_name = os.environ.get('GITHUB_REPOSITORY', 'unknown')
           event_name = os.environ.get('GITHUB_EVENT_NAME', 'unknown')
           ref = os.environ.get('GITHUB_REF', 'unknown')
@@ -175,15 +161,15 @@ jobs:
           run_number = os.environ.get('GITHUB_RUN_NUMBER', 'unknown')
           run_attempt = os.environ.get('GITHUB_RUN_ATTEMPT', 'unknown')
 
-          # Get repository visibility from GitHub API
-          is_private_str = os.environ.get('GITHUB_REPOSITORY_IS_PRIVATE', 'true')
-          is_private = is_private_str.lower() == 'true'
-
           repo_root = Path.cwd()
           files_analyzed = []
           language_stats = defaultdict(lambda: {
-              'files': 0, 'total_lines': 0, 'code_lines': 0,
-              'comment_lines': 0, 'empty_lines': 0, 'size': 0
+              'files': 0,
+              'total_lines': 0,
+              'code_lines': 0,
+              'comment_lines': 0,
+              'empty_lines': 0,
+              'size': 0
           })
 
           exclude_dirs = {'.git', '.github', 'node_modules', '__pycache__', 'venv', 'env', '.venv', 'dist', 'build', '.next', '.nuxt'}
@@ -194,11 +180,15 @@ jobs:
                   should_exclude = any(excl in filepath.parts for excl in exclude_dirs)
                   if should_exclude:
                       continue
+
+                  # Skip the analyzer script and workflow file themselves
                   if filepath.name in exclude_files:
                       continue
+
                   result = analyze_file(filepath)
                   if result:
                       files_analyzed.append(result)
+
                       lang = result['language']
                       if lang != 'binary':
                           language_stats[lang]['files'] += 1
@@ -211,6 +201,7 @@ jobs:
           total_files = len(files_analyzed)
           text_files = sum(1 for f in files_analyzed if f['type'] == 'text')
           binary_files = total_files - text_files
+
           total_code_lines = sum(stats['code_lines'] for stats in language_stats.values())
           total_lines = sum(stats['total_lines'] for stats in language_stats.values())
 
@@ -240,7 +231,6 @@ jobs:
               'run_number': int(run_number),
               'run_attempt': int(run_attempt),
               'analyzed_at': datetime.utcnow().isoformat() + 'Z',
-              'is_private': is_private,
               'summary': {
                   'total_files': total_files,
                   'text_files': text_files,
@@ -261,11 +251,13 @@ jobs:
 
           print(f"📊 Repository Analysis Complete:")
           print(f"   Repository: {result['repository']}")
-          print(f"   Private: {result['is_private']}")
           print(f"   Total Files: {result['summary']['total_files']}")
           print(f"   Code Lines: {result['summary']['code_lines']:,}")
           print(f"   Languages: {result['summary']['unique_languages']}")
           print(f"   Total Size: {result['summary']['total_size_mb']} MB")
+          print(f"📈 Top Languages by Code:")
+          for lang, stats in list(languages.items())[:5]:
+              print(f"   - {stats['name']}: {stats['code_lines']:,} lines ({stats['percentage']}%)")
 
           PYTHON_SCRIPT
 
@@ -276,64 +268,80 @@ jobs:
           WEBHOOK_ENDPOINT: ${{ secrets.WEBHOOK_ENDPOINT }}
           WEBHOOK_API_TOKEN: ${{ secrets.WEBHOOK_API_TOKEN }}
         run: |
+          # ⏳ WAIT FOR SECRETS: GitHub App sets secrets just before pushing the workflow.
+          # On the very first run the secrets may still be propagating — retry up to 5 times.
           MAX_WAIT=5
           WAIT_COUNT=0
           until [ -n "$WEBHOOK_ENDPOINT" ] && [ -n "$WEBHOOK_API_TOKEN" ]; do
             if [ "$WAIT_COUNT" -ge "$MAX_WAIT" ]; then
-              echo "❌ Secrets not available after ${MAX_WAIT} retries."
+              echo "❌ Secrets (WEBHOOK_ENDPOINT / WEBHOOK_API_TOKEN) are not available after ${MAX_WAIT} retries."
+              echo "Please check that the GitHub App has write access to repository secrets and re-install/re-add the repository."
               exit 1
             fi
-            echo "⏳ Secrets not yet available — waiting 10 s..."
+            echo "⏳ Secrets not yet available — waiting 10 s (attempt $((WAIT_COUNT+1))/$MAX_WAIT)..."
             sleep 10
             WAIT_COUNT=$((WAIT_COUNT+1))
+            # Re-read secrets from the environment (GitHub populates them at job start,
+            # so we re-export from the workflow context on each retry iteration)
             WEBHOOK_ENDPOINT="${{ secrets.WEBHOOK_ENDPOINT }}"
             WEBHOOK_API_TOKEN="${{ secrets.WEBHOOK_API_TOKEN }}"
           done
 
+          # 🔥 FAIL FAST: Final hard check
           if [ -z "$WEBHOOK_ENDPOINT" ]; then
             echo "❌ WEBHOOK_ENDPOINT secret is not set!"
+            echo "Please ensure the GitHub App has pushed the required secrets to this repository."
             exit 1
           fi
 
           if [ -z "$WEBHOOK_API_TOKEN" ]; then
             echo "❌ WEBHOOK_API_TOKEN secret is not set!"
+            echo "Please ensure the GitHub App has pushed the required secrets to this repository."
             exit 1
           fi
 
           if [ -f enhanced_analysis_result.json ]; then
             echo "Sending analysis to $WEBHOOK_ENDPOINT"
+
             temp_response=$(mktemp)
 
-            http_code=$(curl -L -X POST "$WEBHOOK_ENDPOINT"               -H "Content-Type: application/json"               -H "Accept: application/json"               -H "X-API-Token: $WEBHOOK_API_TOKEN"               -H "X-GitHub-Event: ${{ github.event_name }}"               -H "X-Repository: ${{ github.repository }}"               -H "X-Run-ID: ${{ github.run_id }}"               -d @enhanced_analysis_result.json               --max-time 30               --connect-timeout 10               -w "%{http_code}"               -o "$temp_response"               -s               --location               --fail 2>&1) || true
+            http_code=$(curl -L -X POST "$WEBHOOK_ENDPOINT"               -H "Content-Type: application/json"               -H "Accept: application/json"               -H "X-API-Token: $WEBHOOK_API_TOKEN"               -H "X-GitHub-Event: ${{ github.event_name }}"               -H "X-Repository: ${{ github.repository }}"               -H "X-Run-ID: ${{ github.run_id }}"               -d @enhanced_analysis_result.json               --max-time 30               --connect-timeout 10               -w "%{http_code}"               -o "$temp_response"               -s               --location               --fail               2>&1) || true
 
             if [ -f "$temp_response" ]; then
               response_body=$(cat "$temp_response")
+
               if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
                 echo "✅ Analysis sent successfully (HTTP $http_code)"
                 echo "Response: $response_body"
               else
                 echo "❌ Failed to send analysis (HTTP $http_code)"
                 echo "Response: $response_body"
+
+                # 🔥 SAFER RETRY: Only retry if we have a valid endpoint
                 if [ -n "$WEBHOOK_ENDPOINT" ] && [ "$WEBHOOK_ENDPOINT" != "/" ]; then
                   if [[ "$WEBHOOK_ENDPOINT" == */ ]]; then
                     alt_endpoint="${WEBHOOK_ENDPOINT%/}"
                   else
                     alt_endpoint="${WEBHOOK_ENDPOINT}/"
                   fi
+
                   echo "Retrying with alternative endpoint: $alt_endpoint"
                   http_code2=$(curl -L -X POST "$alt_endpoint"                     -H "Content-Type: application/json"                     -H "Accept: application/json"                     -H "X-API-Token: $WEBHOOK_API_TOKEN"                     -d @enhanced_analysis_result.json                     --max-time 30                     -w "%{http_code}"                     -o "$temp_response"                     -s                     --location)
+
                   if [ "$http_code2" -ge 200 ] && [ "$http_code2" -lt 300 ]; then
                     echo "✅ Analysis sent successfully on retry (HTTP $http_code2)"
+                    echo "Response: $(cat "$temp_response")"
                   else
-                    echo "❌ Failed on retry (HTTP $http_code2)"
+                    echo "❌ Failed to send analysis on retry (HTTP $http_code2)"
                     cat "$temp_response"
                     exit 1
                   fi
                 else
-                  echo "❌ Cannot retry: invalid endpoint"
+                  echo "❌ Cannot retry: WEBHOOK_ENDPOINT is empty or invalid"
                   exit 1
                 fi
               fi
+
               rm -f "$temp_response"
             else
               echo "❌ No response received"
