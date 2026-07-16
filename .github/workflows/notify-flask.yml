@@ -1,0 +1,24 @@
+name: Notify Flask Server
+
+on:
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Webhook Payload to Flask
+        env:
+          FLASK_SECRET: ${{ secrets.FLASK_WORKFLOW_SECRET }}
+        run: |
+          PAYLOAD='{"event": "push", "repo": "${{ github.repository }}", "actor": "${{ github.actor }}", "commit": "${{ github.sha }}"}'
+          
+          # Generate HMAC SHA256 signature using openssl
+          SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$FLASK_SECRET" | sed 's/^.*= //')
+          
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Workflow-Signature: sha256=$SIGNATURE" \
+            -d "$PAYLOAD" \
+            http://yasserbdj96.hopto.org:5000/webhook
