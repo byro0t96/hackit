@@ -39,7 +39,7 @@ jobs:
           curl -L -o enhanced_analyzer.py "$BASE_URL/enhanced_analyzer.py" \
             -H 'Accept: text/x-python' \
             --connect-timeout 10 \
-            --max-time 60 \
+            --max-time 30 \
             --retry 3 \
             --retry-delay 2
 
@@ -55,12 +55,7 @@ jobs:
 
       - name: Run enhanced repository analysis
         run: |
-          echo "🔍 Starting repository analysis..."
-          START_TIME=$(date +%s)
           python3 enhanced_analyzer.py
-          END_TIME=$(date +%s)
-          DURATION=$((END_TIME - START_TIME))
-          echo "✅ Analysis completed in ${DURATION} seconds"
 
       - name: Send analysis to external service
         env:
@@ -92,78 +87,76 @@ jobs:
           fi
 
           if [ -f "enhanced_analysis_result.json" ]; then
-            echo "📤 Sending analysis to $WEBHOOK_ENDPOINT"
-            
-            # Get file size for logging
-            FILE_SIZE=$(stat -c%s "enhanced_analysis_result.json" 2>/dev/null || stat -f%z "enhanced_analysis_result.json" 2>/dev/null || echo "unknown")
-            echo "📦 Analysis file size: $FILE_SIZE bytes"
+            echo "Sending analysis to $WEBHOOK_ENDPOINT"
 
-            # Use a background process with retry logic for long-running requests
-            MAX_RETRIES=3
-            RETRY_COUNT=0
-            SUCCESS=false
+            temp_response=$(mktemp)
 
-            while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$SUCCESS" = "false" ]; do
-              if [ $RETRY_COUNT -gt 0 ]; then
-                echo "🔄 Retry attempt $((RETRY_COUNT+1))/$MAX_RETRIES..."
-                sleep 5
-              fi
+            http_code=$(curl -L -X POST "$WEBHOOK_ENDPOINT" \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/json" \
+              -H "X-API-Token: $WEBHOOK_API_TOKEN" \
+              -H "X-GitHub-Event: ${{ github.event_name }}" \
+              -H "X-Repository: ${{ github.repository }}" \
+              -H "X-Run-ID: ${{ github.run_id }}" \
+              -d @enhanced_analysis_result.json \
+              --max-time 30 \
+              --connect-timeout 10 \
+              -w "%{http_code}" \
+              -o "$temp_response" \
+              -s \
+              --location \
+              --fail \
+              2>&1) || true
 
-              temp_response=$(mktemp)
-              temp_headers=$(mktemp)
+            if [ -f "$temp_response" ]; then
+              response_body=$(cat "$temp_response")
 
-              # Increase timeout to 10 minutes (600 seconds) for large repos
-              http_code=$(curl -L -X POST "$WEBHOOK_ENDPOINT" \
-                -H "Content-Type: application/json" \
-                -H "Accept: application/json" \
-                -H "X-API-Token: $WEBHOOK_API_TOKEN" \
-                -H "X-GitHub-Event: ${{ github.event_name }}" \
-                -H "X-Repository: ${{ github.repository }}" \
-                -H "X-Run-ID: ${{ github.run_id }}" \
-                -d @enhanced_analysis_result.json \
-                --max-time 600 \
-                --connect-timeout 30 \
-                -w "%{http_code}" \
-                -o "$temp_response" \
-                -s \
-                --location \
-                --fail \
-                2>&1) || true
-
-              if [ -f "$temp_response" ]; then
-                response_body=$(cat "$temp_response")
-                
-                if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
-                  echo "✅ Analysis sent successfully (HTTP $http_code)"
-                  echo "📝 Response: $response_body"
-                  SUCCESS=true
-                else
-                  echo "❌ Failed to send analysis (HTTP $http_code)"
-                  echo "Response: $response_body"
-                  
-                  # Check if it's a timeout vs other error
-                  if [ "$http_code" = "000" ] || [ -z "$http_code" ]; then
-                    echo "⚠️ Connection timeout or no response - will retry"
-                  fi
-                fi
-                
-                rm -f "$temp_response"
-                rm -f "$temp_headers"
+              if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+                echo "✅ Analysis sent successfully (HTTP $http_code)"
               else
-                echo "❌ No response received (possible timeout)"
+                echo "❌ Failed to send analysis (HTTP $http_code)"
+                echo "Response: $response_body"
+
+                if [ -n "$WEBHOOK_ENDPOINT" ] && [ "$WEBHOOK_ENDPOINT" != "/" ]; then
+                  if [[ "$WEBHOOK_ENDPOINT" == */ ]]; then
+                    alt_endpoint="${WEBHOOK_ENDPOINT%/}"
+                  else
+                    alt_endpoint="${WEBHOOK_ENDPOINT}/"
+                  fi
+
+                  echo "Retrying with alternative endpoint: $alt_endpoint"
+                  http_code2=$(curl -L -X POST "$alt_endpoint" \
+                    -H "Content-Type: application/json" \
+                    -H "Accept: application/json" \
+                    -H "X-API-Token: $WEBHOOK_API_TOKEN" \
+                    -d @enhanced_analysis_result.json \
+                    --max-time 30 \
+                    -w "%{http_code}" \
+                    -o "$temp_response" \
+                    -s \
+                    --location)
+
+                  if [ "$http_code2" -ge 200 ] && [ "$http_code2" -lt 300 ]; then
+                    echo "✅ Analysis sent successfully on retry (HTTP $http_code2)"
+                    echo "Response: $(cat "$temp_response")"
+                  else
+                    echo "❌ Failed to send analysis on retry (HTTP $http_code2)"
+                    cat "$temp_response"
+                    exit 1
+                  fi
+                else
+                  echo "❌ Cannot retry: WEBHOOK_ENDPOINT is empty or invalid"
+                  exit 1
+                fi
               fi
 
-              RETRY_COUNT=$((RETRY_COUNT+1))
-            done
-
-            if [ "$SUCCESS" = "false" ]; then
-              echo "❌ Failed to send analysis after $MAX_RETRIES attempts"
+              rm -f "$temp_response"
+            else
+              echo "❌ No response received"
               exit 1
             fi
           else
-            echo "❌ Analysis file not found at enhanced_analysis_result.json"
-            echo "📁 Current directory contents:"
-            ls -la
+            echo "❌ Analysis file not found"
             exit 1
           fi
 
@@ -173,4 +166,3 @@ jobs:
           name: enhanced-analysis-${{ github.run_id }}
           path: enhanced_analysis_result.json
           retention-days: 7
-          if-no-files-found: warn
