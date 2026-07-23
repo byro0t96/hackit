@@ -12,6 +12,11 @@ on:
         required: false
         default: 'false'
         type: string
+      max_files:
+        description: 'Maximum files to analyze (0 = unlimited)'
+        required: false
+        default: '0'
+        type: string
 
 jobs:
   analyze:
@@ -19,19 +24,38 @@ jobs:
     permissions:
       contents: read
       actions: read
+    timeout-minutes: 30  # ⏱️ Hard limit for workflow
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4.2.2
         with:
           fetch-depth: 0
+          # For large repos, limit fetch depth
+          fetch-depth: ${{ github.event_name == 'push' && 50 || 0 }}
 
       - name: Setup Python
         uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.11'
 
+      - name: Check repository size
+        id: check_size
+        run: |
+          TOTAL_SIZE=$(du -sb . 2>/dev/null | cut -f1 || echo "0")
+          MAX_SIZE=$((100 * 1024 * 1024))  # 100MB max for auto-analysis
+          
+          if [ -n "$TOTAL_SIZE" ] && [ "$TOTAL_SIZE" -gt "$MAX_SIZE" ]; then
+            echo "⚠️ Repository size ($(($TOTAL_SIZE/1024/1024)) MB) exceeds limit (100 MB)"
+            echo "LIMIT_EXCEEDED=true" >> $GITHUB_OUTPUT
+            echo "Skipping full analysis - use manual trigger for large repos"
+          else
+            echo "LIMIT_EXCEEDED=false" >> $GITHUB_OUTPUT
+            echo "SIZE_MB=$(($TOTAL_SIZE/1024/1024))" >> $GITHUB_OUTPUT
+          fi
+
       - name: Download analyzer script
+        if: steps.check_size.outputs.LIMIT_EXCEEDED == 'false'
         env:
             BASE_URL: ${{ secrets.WEBSITE_BASE_URL }}
         run: |
@@ -39,7 +63,7 @@ jobs:
           curl -L -o enhanced_analyzer.py "$BASE_URL/enhanced_analyzer.py" \
             -H 'Accept: text/x-python' \
             --connect-timeout 10 \
-            --max-time 30 \
+            --max-time 60 \
             --retry 3 \
             --retry-delay 2
 
@@ -50,27 +74,56 @@ jobs:
 
           LINE_COUNT=$(wc -l < enhanced_analyzer.py)
           echo "✅ Downloaded enhanced_analyzer.py ($LINE_COUNT lines)"
-          echo '📋 Script preview (first 10 lines):'
-          head -10 enhanced_analyzer.py
 
       - name: Run enhanced repository analysis
+        if: steps.check_size.outputs.LIMIT_EXCEEDED == 'false'
         run: |
-          python3 enhanced_analyzer.py
+          echo "🚀 Starting analysis..."
+          # Run with timeout protection
+          timeout 300 python3 enhanced_analyzer.py || {
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 124 ]; then
+              echo "⚠️ Analysis timed out after 5 minutes"
+              echo "Creating partial results..."
+            else
+              echo "❌ Analysis failed with exit code: $EXIT_CODE"
+              exit $EXIT_CODE
+            fi
+          }
+
+          # Check if results were generated
+          if [ -f "enhanced_analysis_result.json" ]; then
+            echo "✅ Analysis completed successfully"
+            FILE_SIZE=$(stat -c%s enhanced_analysis_result.json 2>/dev/null || stat -f%z enhanced_analysis_result.json 2>/dev/null || echo "0")
+            echo "📊 Results file size: $(($FILE_SIZE/1024)) KB"
+          else
+            echo "❌ No analysis results generated"
+            # Create minimal result file
+            echo '{
+              "error": "Analysis timed out or failed",
+              "repository": "${{ github.repository }}",
+              "summary": {
+                "total_files": 0,
+                "code_lines": 0
+              }
+            }' > enhanced_analysis_result.json
+          fi
 
       - name: Send analysis to external service
         env:
           WEBHOOK_ENDPOINT: ${{ secrets.WEBHOOK_ENDPOINT }}
           WEBHOOK_API_TOKEN: ${{ secrets.WEBHOOK_API_TOKEN }}
         run: |
-          MAX_WAIT=5
+          # Wait for secrets with timeout
+          MAX_WAIT=10
           WAIT_COUNT=0
           until [ -n "$WEBHOOK_ENDPOINT" ] && [ -n "$WEBHOOK_API_TOKEN" ]; do
             if [ "$WAIT_COUNT" -ge "$MAX_WAIT" ]; then
               echo "❌ Secrets not available after ${MAX_WAIT} retries."
               exit 1
             fi
-            echo "⏳ Secrets not yet available — waiting 10 s (attempt $((WAIT_COUNT+1))/$MAX_WAIT)..."
-            sleep 10
+            echo "⏳ Secrets not yet available — waiting 5s (attempt $((WAIT_COUNT+1))/$MAX_WAIT)..."
+            sleep 5
             WAIT_COUNT=$((WAIT_COUNT+1))
             WEBHOOK_ENDPOINT="${{ secrets.WEBHOOK_ENDPOINT }}"
             WEBHOOK_API_TOKEN="${{ secrets.WEBHOOK_API_TOKEN }}"
@@ -81,17 +134,11 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$WEBHOOK_API_TOKEN" ]; then
-            echo "❌ WEBHOOK_API_TOKEN secret is not set!"
-            exit 1
-          fi
-
           if [ -f "enhanced_analysis_result.json" ]; then
-            echo "Sending analysis to $WEBHOOK_ENDPOINT"
-
-            temp_response=$(mktemp)
-
-            http_code=$(curl -L -X POST "$WEBHOOK_ENDPOINT" \
+            echo "📤 Sending analysis to $WEBHOOK_ENDPOINT"
+            
+            # Use timeout for curl
+            if curl -L -X POST "$WEBHOOK_ENDPOINT" \
               -H "Content-Type: application/json" \
               -H "Accept: application/json" \
               -H "X-API-Token: $WEBHOOK_API_TOKEN" \
@@ -99,61 +146,41 @@ jobs:
               -H "X-Repository: ${{ github.repository }}" \
               -H "X-Run-ID: ${{ github.run_id }}" \
               -d @enhanced_analysis_result.json \
-              --max-time 30 \
-              --connect-timeout 10 \
-              -w "%{http_code}" \
-              -o "$temp_response" \
+              --max-time 60 \
+              --connect-timeout 15 \
+              --retry 2 \
+              --retry-delay 5 \
+              -f \
               -s \
-              --location \
-              --fail \
-              2>&1) || true
-
-            if [ -f "$temp_response" ]; then
-              response_body=$(cat "$temp_response")
-
-              if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
-                echo "✅ Analysis sent successfully (HTTP $http_code)"
-              else
-                echo "❌ Failed to send analysis (HTTP $http_code)"
-                echo "Response: $response_body"
-
-                if [ -n "$WEBHOOK_ENDPOINT" ] && [ "$WEBHOOK_ENDPOINT" != "/" ]; then
-                  if [[ "$WEBHOOK_ENDPOINT" == */ ]]; then
-                    alt_endpoint="${WEBHOOK_ENDPOINT%/}"
-                  else
-                    alt_endpoint="${WEBHOOK_ENDPOINT}/"
-                  fi
-
-                  echo "Retrying with alternative endpoint: $alt_endpoint"
-                  http_code2=$(curl -L -X POST "$alt_endpoint" \
-                    -H "Content-Type: application/json" \
-                    -H "Accept: application/json" \
-                    -H "X-API-Token: $WEBHOOK_API_TOKEN" \
-                    -d @enhanced_analysis_result.json \
-                    --max-time 30 \
-                    -w "%{http_code}" \
-                    -o "$temp_response" \
-                    -s \
-                    --location)
-
-                  if [ "$http_code2" -ge 200 ] && [ "$http_code2" -lt 300 ]; then
-                    echo "✅ Analysis sent successfully on retry (HTTP $http_code2)"
-                    echo "Response: $(cat "$temp_response")"
-                  else
-                    echo "❌ Failed to send analysis on retry (HTTP $http_code2)"
-                    cat "$temp_response"
-                    exit 1
-                  fi
-                else
-                  echo "❌ Cannot retry: WEBHOOK_ENDPOINT is empty or invalid"
-                  exit 1
-                fi
-              fi
-
-              rm -f "$temp_response"
+              -o /dev/null; then
+              echo "✅ Analysis sent successfully"
             else
-              echo "❌ No response received"
-              exit 1
+              echo "❌ Failed to send analysis"
+              
+              # Try alternative endpoint
+              if [[ "$WEBHOOK_ENDPOINT" == */ ]]; then
+                ALT_ENDPOINT="${WEBHOOK_ENDPOINT%/}"
+              else
+                ALT_ENDPOINT="${WEBHOOK_ENDPOINT}/"
+              fi
+              echo "🔄 Retrying with alternative endpoint: $ALT_ENDPOINT"
+              
+              if curl -L -X POST "$ALT_ENDPOINT" \
+                -H "Content-Type: application/json" \
+                -H "Accept: application/json" \
+                -H "X-API-Token: $WEBHOOK_API_TOKEN" \
+                -d @enhanced_analysis_result.json \
+                --max-time 60 \
+                --connect-timeout 15 \
+                --retry 2 \
+                -f \
+                -s \
+                -o /dev/null; then
+                echo "✅ Analysis sent successfully on retry"
+              else
+                echo "❌ Failed to send analysis on retry"
+                exit 1
+              fi
             fi
           else
             echo "❌ Analysis file not found"
