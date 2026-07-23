@@ -30,7 +30,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4.2.2
         with:
-          fetch-depth: 0
           # For large repos, limit fetch depth
           fetch-depth: ${{ github.event_name == 'push' && 50 || 0 }}
 
