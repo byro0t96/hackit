@@ -51,8 +51,7 @@ jobs:
           # joined by "::#?::". Split it back apart and export each part as
           # a real env var so every later step (and the Python analyzer
           # script it runs) can just read os.environ / $VAR as before.
-          mapfile -t PARTS <<< "$(printf '%s' "$WEBHOOK_CONFIG" | sed 's/::#?::/
-/g')"
+          mapfile -t PARTS <<< "$(printf '%s' "$WEBHOOK_CONFIG" | sed 's/::#?::/\n/g')"
 
           WEBHOOK_ENDPOINT="${PARTS[0]}"
           WEBHOOK_API_TOKEN="${PARTS[1]}"
