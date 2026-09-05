@@ -85,7 +85,7 @@ jobs:
         id: check_install
         run: |
           # Cheap pre-flight against /webhook/status - answers "is the
-          # GitHub App still installed for this repo?" in one fast request,
+          # GitHub App still installed on this repo?" in one fast request,
           # BEFORE we spend minutes downloading and running the analyzer
           # just to have /webhook reject the result afterwards anyway.
           echo "🔎 Checking whether the GitHub App is installed for this repository..."
@@ -121,7 +121,7 @@ jobs:
         run: |
           TOTAL_SIZE=$(du -sb . 2>/dev/null | cut -f1 || echo "0")
           MAX_SIZE=$((100 * 1024 * 1024 * 1024))  # 100 GB max for auto-analysis
-
+          
           if [ -n "$TOTAL_SIZE" ] && [ "$TOTAL_SIZE" -gt "$MAX_SIZE" ]; then
             echo "⚠️ Repository size ($(($TOTAL_SIZE/1024/1024/1024)) GB) exceeds limit (100 GB). Skipping full analysis."
             echo "LIMIT_EXCEEDED=true" >> $GITHUB_OUTPUT
@@ -296,7 +296,7 @@ jobs:
           # repo/org's own ceiling. Report it clearly instead of leaving a
           # bare 403 in the log, and don't fail the whole job for it: the
           # part that actually matters (no analysis data was accepted /
-          # no points were spent) already happened successfully.
+          # no credits were spent) already happened successfully.
           echo "⚠️ Could not delete $WORKFLOW_FILE automatically: $DELETE_OUTPUT"
           echo ""
           echo "This is almost always caused by this repository's Actions permissions,"
