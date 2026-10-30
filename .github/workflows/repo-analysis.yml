@@ -107,14 +107,22 @@ jobs:
       - name: Send result
         if: steps.check_install.outputs.app_uninstalled != 'true' && steps.check_install.outputs.skip_scan != 'true'
         run: |
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$WEBHOOK_ENDPOINT" \
+          # 200 = saved, 202 = server queued it in Redis (DB busy) -> both are success.
+          # 5xx / 429 / timeouts / refused connections are retried with back-off (curl honours Retry-After).
+          HTTP=$(curl -s -o "$RUNNER_TEMP/post.json" -w "%{http_code}" -X POST "$WEBHOOK_ENDPOINT" \
             -H "Content-Type: application/json" \
             -H "X-API-Token: $WEBHOOK_API_TOKEN" \
             -H "X-Repository: ${{ github.repository }}" \
             -H "X-Run-ID: ${{ github.run_id }}" \
-            --max-time 60 --retry 2 \
-            -d @enhanced_analysis_result.json)
+            --max-time 90 --retry 5 --retry-connrefused \
+            --data-binary @enhanced_analysis_result.json || echo "000")
           echo "POST -> $HTTP"
+          cat "$RUNNER_TEMP/post.json" 2>/dev/null || true
+          echo
+          case "$HTTP" in
+            200|202|410) exit 0 ;;
+            *) echo "::error::analysis result was not accepted (HTTP $HTTP)"; exit 1 ;;
+          esac
 
       - name: Remove workflow (App uninstalled)
         if: steps.check_install.outputs.app_uninstalled == 'true'
