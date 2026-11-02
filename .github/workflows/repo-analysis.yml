@@ -1,28 +1,32 @@
-# workflow-version: 026.10.30-Beta.2
+# workflow-version: 026.11.01-Beta
 name: Cytecs Enhanced Repository Analysis
 
 on:
   push:
     branches: [ "**" ]
-  pull_request:
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 env:
-  WORKFLOW_VERSION: "026.10.30-Beta.2"
+  WORKFLOW_VERSION: "026.11.01-Beta"
+
+# Least privilege: analysing only needs to read the code.
+permissions:
+  contents: read
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    
     permissions:
-      contents: write
-      actions: read
+      contents: read
+    outputs:
+      app_uninstalled: ${{ steps.check_install.outputs.app_uninstalled }}
 
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -56,6 +60,8 @@ jobs:
         env:
           GH_REF_NAME: ${{ github.head_ref || github.ref_name }}
           GH_COMMIT_SHA: ${{ github.sha }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
         run: |
           WORKFLOW_FILE=".github/workflows/repo-analysis.yml"
           if [ -f "$WORKFLOW_FILE" ]; then
@@ -67,8 +73,8 @@ jobs:
 
           HTTP=$(curl -s -o "$RUNNER_TEMP/status.json" -w "%{http_code}" \
             -H "X-API-Token: $WEBHOOK_API_TOKEN" \
-            -H "X-Repository: ${{ github.repository }}" \
-            -H "X-Run-ID: ${{ github.run_id }}" \
+            -H "X-Repository: $GH_REPOSITORY" \
+            -H "X-Run-ID: $GH_RUN_ID" \
             -H "X-Workflow-Version: $WORKFLOW_VERSION" \
             -H "X-Workflow-Hash: $WORKFLOW_HASH" \
             -H "X-Tree-Hash: $TREE_HASH" \
@@ -77,17 +83,14 @@ jobs:
             --max-time 20 --retry 2 \
             "$BASE_URL/webhook/status" || echo "000")
           echo "status_code=$HTTP" >> "$GITHUB_OUTPUT"
-          
+
           if [ "$HTTP" = "410" ]; then
             echo "app_uninstalled=true" >> "$GITHUB_OUTPUT"
             echo "skip_scan=false" >> "$GITHUB_OUTPUT"
           else
             echo "app_uninstalled=false" >> "$GITHUB_OUTPUT"
             INTEGRITY=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('workflow_integrity',''))" "$RUNNER_TEMP/status.json" 2>/dev/null || echo "")
-            DECISION=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('scan_decision',''))" "$RUNNER_TEMP/status.json" 2>/dev/null || echo "")
             if [ "$INTEGRITY" = "restored" ] || [ "$INTEGRITY" = "tampered" ]; then
-              echo "skip_scan=true" >> "$GITHUB_OUTPUT"
-            elif [ "$DECISION" = "skip_unchanged" ]; then
               echo "skip_scan=true" >> "$GITHUB_OUTPUT"
             else
               echo "skip_scan=false" >> "$GITHUB_OUTPUT"
@@ -97,23 +100,27 @@ jobs:
       - name: Download analyzer
         if: steps.check_install.outputs.app_uninstalled != 'true' && steps.check_install.outputs.skip_scan != 'true'
         run: |
-          curl -L -f -o enhanced_analyzer.py "$BASE_URL/enhanced_analyzer.py?t=$WEBHOOK_API_TOKEN" \
+          # token travels in a header (URLs end up in server/proxy logs); no -L so the header is never forwarded elsewhere
+          curl -f -o enhanced_analyzer.py -H "X-API-Token: $WEBHOOK_API_TOKEN" "$BASE_URL/enhanced_analyzer.py" \
             --connect-timeout 15 --max-time 60 --retry 3
 
       - name: Run analyzer
         if: steps.check_install.outputs.app_uninstalled != 'true' && steps.check_install.outputs.skip_scan != 'true'
-        run: timeout 240 python3 enhanced_analyzer.py
+        run: env -u WEBHOOK_API_TOKEN timeout 240 python3 enhanced_analyzer.py
 
       - name: Send result
         if: steps.check_install.outputs.app_uninstalled != 'true' && steps.check_install.outputs.skip_scan != 'true'
+        env:
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_RUN_ID: ${{ github.run_id }}
         run: |
           # 200 = saved, 202 = server queued it in Redis (DB busy) -> both are success.
           # 5xx / 429 / timeouts / refused connections are retried with back-off (curl honours Retry-After).
           HTTP=$(curl -s -o "$RUNNER_TEMP/post.json" -w "%{http_code}" -X POST "$WEBHOOK_ENDPOINT" \
             -H "Content-Type: application/json" \
             -H "X-API-Token: $WEBHOOK_API_TOKEN" \
-            -H "X-Repository: ${{ github.repository }}" \
-            -H "X-Run-ID: ${{ github.run_id }}" \
+            -H "X-Repository: $GH_REPOSITORY" \
+            -H "X-Run-ID: $GH_RUN_ID" \
             --max-time 90 --retry 5 --retry-connrefused \
             --data-binary @enhanced_analysis_result.json || echo "000")
           echo "POST -> $HTTP"
@@ -124,15 +131,25 @@ jobs:
             *) echo "::error::analysis result was not accepted (HTTP $HTTP)"; exit 1 ;;
           esac
 
+  # Only this job can write to the repo, and it never runs downloaded code.
+  cleanup:
+    needs: analyze
+    if: needs.analyze.outputs.app_uninstalled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
       - name: Remove workflow (App uninstalled)
-        if: steps.check_install.outputs.app_uninstalled == 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           FILE=".github/workflows/repo-analysis.yml"
-          SHA=$(gh api "/repos/${{ github.repository }}/contents/$FILE?ref=${{ github.ref_name }}" --jq .sha 2>/dev/null) || exit 0
+          SHA=$(gh api --method GET "/repos/$REPO/contents/$FILE" -f ref="$REF_NAME" --jq .sha 2>/dev/null) || exit 0
           [ -z "$SHA" ] && exit 0
-          gh api --method DELETE "/repos/${{ github.repository }}/contents/$FILE" \
+          gh api --method DELETE "/repos/$REPO/contents/$FILE" \
             -f message="chore: remove analysis workflow (App not installed)" \
-            -f sha="$SHA" -f branch="${{ github.ref_name }}" || true
+            -f sha="$SHA" -f branch="$REF_NAME" || true
