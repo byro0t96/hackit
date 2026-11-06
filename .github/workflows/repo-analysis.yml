@@ -9,7 +9,6 @@ on:
 env:
   WORKFLOW_VERSION: "026.11.02-Beta"
 
-# Least privilege: analysing only needs to read the code.
 permissions:
   contents: read
 
@@ -131,7 +130,6 @@ jobs:
             *) echo "::error::analysis result was not accepted (HTTP $HTTP)"; exit 1 ;;
           esac
 
-  # Only this job can write to the repo, and it never runs downloaded code.
   cleanup:
     needs: analyze
     if: needs.analyze.outputs.app_uninstalled == 'true'
